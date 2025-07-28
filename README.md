@@ -49,7 +49,7 @@ pip install torch torchvision transformers matplotlib tqdm
 
 ## 📁 File
 
-* `few_zero_learning.py`
+* `main.py`
   Full end‑to‑end script. Contains data loading, few‑shot & zero‑shot routines, evaluation, and plotting.
 
 
@@ -64,7 +64,7 @@ pip install torch torchvision transformers matplotlib tqdm
 2. **Run the script**:
 
    ```bash
-   python few_zero_learning.py
+   python main.py
    ```
 
    * Downloads CIFAR‑10 automatically.
