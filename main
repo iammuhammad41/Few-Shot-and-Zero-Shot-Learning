@@ -1,0 +1,131 @@
+import os
+import random
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, Subset, TensorDataset
+from torchvision import datasets, transforms, models
+from PIL import Image
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+from transformers import CLIPProcessor, CLIPModel
+
+# Configuration
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+shots_list = [1, 5, 10]
+num_classes = 10
+batch_size = 64
+epochs = 20
+
+# Data loading: CIFAR-10
+data_transform = transforms.Compose([
+    transforms.Resize(224),
+    transforms.ToTensor(),
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+])
+train_dataset = datasets.CIFAR10(root='./data', train=True, download=True, transform=data_transform)
+test_dataset = datasets.CIFAR10(root='./data', train=False, download=True, transform=data_transform)
+test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+# Pretrained feature backbone (ResNet18)
+backbone = models.resnet18(pretrained=True)
+_ , feat_dim = backbone.fc.in_features, backbone.fc.in_features
+backbone.fc = nn.Identity()
+backbone = backbone.to(device).eval()
+
+# 3. Zero-shot: CLIP setup
+clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
+clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+class_names = train_dataset.classes
+prompts = [f"a photo of a {label}" for label in class_names]
+text_inputs = clip_processor(text=prompts, return_tensors="pt", padding=True).to(device)
+with torch.no_grad():
+    text_features = clip_model.get_text_features(**text_inputs)
+    text_features /= text_features.norm(dim=-1, keepdim=True)
+
+# Few-shot experiment
+def run_few_shot(shots):
+    # Sample support set
+    support_idxs = []
+    for cls in range(num_classes):
+        inds = [i for i, (_, y) in enumerate(train_dataset) if y == cls]
+        support_idxs += random.sample(inds, shots)
+    support_set = Subset(train_dataset, support_idxs)
+    support_loader = DataLoader(support_set, batch_size=shots, shuffle=True)
+    
+    # Extract backbone features & labels
+    support_feats, support_labels = [], []
+    with torch.no_grad():
+        for imgs, labels in support_loader:
+            imgs = imgs.to(device)
+            feats = backbone(imgs)
+            support_feats.append(feats)
+            support_labels.append(labels.to(device))
+    support_feats = torch.cat(support_feats)
+    support_labels = torch.cat(support_labels)
+
+    # Train linear classifier
+    classifier = nn.Linear(feat_dim, num_classes).to(device)
+    optimizer = optim.Adam(classifier.parameters(), lr=1e-3)
+    criterion = nn.CrossEntropyLoss()
+    for _ in range(epochs):
+        classifier.train()
+        optimizer.zero_grad()
+        logits = classifier(support_feats)
+        loss = criterion(logits, support_labels)
+        loss.backward()
+        optimizer.step()
+
+    # Evaluate on test set
+    classifier.eval()
+    correct, total = 0, 0
+    with torch.no_grad():
+        for imgs, labels in test_loader:
+            imgs, labels = imgs.to(device), labels.to(device)
+            feats = backbone(imgs)
+            preds = classifier(feats).argmax(dim=1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+    return correct / total
+
+# Zero-shot evaluation
+
+def run_zero_shot():
+    correct, total = 0, 0
+    for imgs, labels in tqdm(test_loader, desc="Zero-Shot Eval"):
+        images = [Image.fromarray(((img*0.5+0.5)*255).permute(1,2,0).numpy().astype(np.uint8)) for img in imgs]
+        inputs = clip_processor(images=images, return_tensors="pt").to(device)
+        with torch.no_grad():
+            image_feats = clip_model.get_image_features(**inputs)
+            image_feats /= image_feats.norm(dim=-1, keepdim=True)
+            logits = (100.0 * image_feats @ text_features.T)
+            preds = logits.argmax(dim=-1)
+        correct += (preds.cpu() == labels).sum().item()
+        total += labels.size(0)
+    return correct / total
+
+# Run experiments & plot
+few_shot_acc = {shots: run_few_shot(shots) for shots in shots_list}
+zero_shot_acc = run_zero_shot()
+
+print("Few-Shot Accuracies:")
+for s,a in few_shot_acc.items(): print(f"  {s}-shot: {a*100:.2f}%")
+print(f"Zero-Shot (CLIP): {zero_shot_acc*100:.2f}%")
+
+# Visualization
+plt.figure(figsize=(6,4))
+shots = list(few_shot_acc.keys()) + ['zero']
+accs = [few_shot_acc[s] for s in shots_list] + [zero_shot_acc]
+plt.bar([str(s) for s in shots], [a*100 for a in accs], color=['C0','C1','C2','C3'])
+plt.xlabel('Setting')
+plt.ylabel('Accuracy (%)')
+plt.title('Few-Shot vs Zero-Shot on CIFAR-10')
+plt.show()
+
+if __name__ == '__main__':
+    # ensure reproducibility
+    torch.manual_seed(42)
+    random.seed(42)
+    # run and plot
+    pass  # main logic executed above
